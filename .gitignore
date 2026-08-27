@@ -1,0 +1,24 @@
+# Environments
+venv/
+env/
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/
+
+# Temp processing files
+*.mid
+*.pdf
+*.musicxml
+input.*
+job.json
+
+# Ignore downloaded AI models if kept locally
+peayano_models/
+*.pth
+*.part
