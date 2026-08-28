@@ -27,13 +27,6 @@ def start_fresh_session_dir() -> Path:
     st.session_state[SESSION_TMP_KEY] = new_dir
     return Path(new_dir)
 
-def audio_duration_seconds(path: str) -> float:
-    import librosa
-    try:
-        return float(librosa.get_duration(path=path))
-    except Exception:
-        return 0.0
-
 def render_sidebar():
     with st.sidebar:
         st.header("Hardware Settings")
@@ -48,21 +41,18 @@ def render_sidebar():
         )
 
         st.divider()
-        st.header("Music Theory Settings")
-        st.caption("Adjust these if the PDF rhythms look messy.")
+        st.header("Math Quantization Settings")
+        st.caption("Controls metronome snapping to generate clean Grand Staves.")
         
-        bpm_input = st.number_input("Target Tempo (BPM)", min_value=30, max_value=300, value=120, step=1, 
-                                    help="Leave at 120 if unsure. Auto-detects if left at 120.")
+        bpm_input = st.number_input("Target Tempo (BPM)", min_value=30, max_value=300, value=120, step=1)
         
-        grid_input = st.selectbox("Smallest Note (Quantization)", [8, 16, 32], index=1, 
-                                  format_func=lambda x: f"1/{x} Notes",
-                                  help="Snaps erratic AI human timings to a clean metronome grid.")
-        
-        split_input = st.slider("Hand Split Point (MIDI Pitch)", min_value=36, max_value=84, value=60, 
-                                help="MIDI 60 = Middle C. Adjusts where notes cross between staves.")
+        grid_input = st.selectbox("Strict Snap Grid", [8, 16, 32], index=1, 
+                                  format_func=lambda x: f"1/{x} Notes")
+                                  
+        gap_input = st.slider("Legato Gap Fill (ms)", min_value=0, max_value=200, value=50, step=10)
 
     resolved_ms_path = manual_ms_path.strip() or (str(auto_ms_path) if auto_ms_path else None)
-    return device_choice, resolved_ms_path, bpm_input, grid_input, split_input
+    return device_choice, resolved_ms_path, bpm_input, grid_input, gap_input
 
 def render_pdf_preview(pdf_bytes: bytes) -> None:
     try:
@@ -76,9 +66,9 @@ def render_pdf_preview(pdf_bytes: bytes) -> None:
 
 def main():
     st.title("🎹 PeaYaNo")
-    st.caption("AI piano transcription — Pre-quantized for clean sheet music out.")
+    st.caption("AI piano transcription — Strict Math Grid with Native 2-Staff Engraving.")
 
-    device_choice, ms_path, bpm, grid, split = render_sidebar()
+    device_choice, ms_path, bpm, grid, gap_threshold = render_sidebar()
     
     uploaded_file = st.file_uploader("Drop a piano recording here", type=["mp3", "wav", "m4a", "flac"])
 
@@ -91,7 +81,7 @@ def main():
 
     st.audio(uploaded_file)
     
-    if st.button("🎼 Transcribe to Sheet Music", type="primary", use_container_width=True):
+    if st.button("🎼 Engrave Clean PDF", type="primary", use_container_width=True):
         log_box = st.empty()
         logs = []
 
@@ -107,11 +97,11 @@ def main():
                 device=device_choice,
                 bpm=bpm,
                 grid_division=grid,
-                split_pitch=split,
+                gap_threshold_ms=gap_threshold,
                 progress_callback=progress_callback,
             )
             
-            st.success("Transcription complete!")
+            st.success("Transcription complete! Enjoy your standard 2-staff sheet music.")
             
             pdf_path = Path(results["pdf"])
             if pdf_path.exists():
@@ -121,7 +111,7 @@ def main():
 
             c1, c2 = st.columns(2)
             c1.download_button("⬇️ Download MusicXML", data=Path(results["musicxml"]).read_bytes(), file_name="score.musicxml", use_container_width=True)
-            c2.download_button("⬇️ Download MIDI", data=Path(results["midi"]).read_bytes(), file_name="score.mid", use_container_width=True)
+            c2.download_button("⬇️ Download Clean MIDI", data=Path(results["midi"]).read_bytes(), file_name="clean_score.mid", use_container_width=True)
 
         except TranscriptionError as exc:
             st.error(f"Failed: {exc}")
@@ -130,4 +120,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

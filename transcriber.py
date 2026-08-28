@@ -1,5 +1,5 @@
 """
-transcriber.py - Cleaned Pipeline
+transcriber.py - The Final 'Smart v1' Architecture (Math Grid + Single Track)
 """
 
 import os
@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import time
 import urllib.request
-import json
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -72,70 +71,67 @@ def find_musescore() -> Optional[Path]:
         if p.exists(): return p
     return Path(shutil.which("MuseScore4.exe")) if shutil.which("MuseScore4.exe") else None
 
-def clean_and_quantize_midi(raw_midi_path: str, clean_midi_path: str, detected_bpm: float, grid_division: int = 16):
-    """
-    1. Injects detected BPM.
-    2. Quantizes note onsets.
-    3. Truncates sustained tails to prevent multi-voice ties.
-    4. Keeps a single MIDI channel so MuseScore creates a standard 2-staff Grand Staff.
-    """
+def clean_and_quantize_midi(raw_midi_path: str, clean_midi_path: str, detected_bpm: float, grid_division: int, gap_threshold_ms: float):
     pm = pretty_midi.PrettyMIDI(raw_midi_path)
-    
-    beat_duration = 60.0 / detected_bpm
-    step_duration = beat_duration / (grid_division / 4.0)  # 16th note step
-    
-    # Set explicit tempo
     pm.tempo_changes = (np.array([0.0]), np.array([detected_bpm]))
     
-    clean_instrument = pretty_midi.Instrument(program=0, name="Piano")
+    beat_duration = 60.0 / detected_bpm
+    step_duration = beat_duration / (grid_division / 4.0)
+    gap_threshold_sec = gap_threshold_ms / 1000.0
     
-    # Collect all notes across all generated tracks
-    all_notes = []
+    raw_notes = []
     for inst in pm.instruments:
-        all_notes.extend(inst.notes)
-    
-    # Sort notes chronologically
-    all_notes.sort(key=lambda n: (n.start, n.pitch))
-    
-    # Quantize onsets and cap max durations to avoid pedal overlap
-    for i, note in enumerate(all_notes):
-        # Snap start time to grid
-        snapped_start = round(note.start / step_duration) * step_duration
+        raw_notes.extend(inst.notes)
         
-        # Determine duration: cap note length if another note of similar pitch starts soon
+    # Phase 1: Legato Gap Cleanup
+    notes_by_pitch = {}
+    for note in raw_notes:
+        notes_by_pitch.setdefault(note.pitch, []).append(note)
+        
+    processed_notes = []
+    for pitch, notes in notes_by_pitch.items():
+        notes.sort(key=lambda n: n.start)
+        for i in range(len(notes) - 1):
+            curr_note = notes[i]
+            next_note = notes[i + 1]
+            gap = next_note.start - curr_note.end
+            if 0 < gap <= gap_threshold_sec:
+                curr_note.end = next_note.start
+        processed_notes.extend(notes)
+    
+    processed_notes.sort(key=lambda n: (n.start, n.pitch))
+    
+    piano = pretty_midi.Instrument(program=0, name="Piano")
+
+    # Phase 2: Strict Math Quantization
+    for note in processed_notes:
+        snapped_start = round(note.start / step_duration) * step_duration
         raw_duration = note.end - note.start
         snapped_duration = max(step_duration, round(raw_duration / step_duration) * step_duration)
-        
-        # Truncate length: don't let single notes hold longer than 1 measure (4 beats)
         max_allowed_duration = beat_duration * 4.0
         snapped_duration = min(snapped_duration, max_allowed_duration)
         
         note.start = snapped_start
         note.end = snapped_start + snapped_duration
-        clean_instrument.notes.append(note)
+        piano.notes.append(note)
         
-    pm.instruments = [clean_instrument]
+    # Assigning to a single track forces MuseScore to render exactly 1 Grand Staff (2 staves)
+    pm.instruments = [piano]
     pm.write(clean_midi_path)
 
-def engrave_batch_musescore(midi_path: str, out_pdf: str, out_xml: str, ms_path: str, progress_callback: ProgressCallback = None):
-    _log("Rendering clean Grand Staff via MuseScore CLI...", progress_callback)
+def engrave_musescore(midi_path: str, out_pdf: str, out_xml: str, ms_path: str, progress_callback: ProgressCallback = None):
+    _log("Rendering single-track quantized MIDI via MuseScore CLI...", progress_callback)
     
-    job_file = Path(midi_path).parent / "job.json"
-    job_data = [
-        {"in": str(midi_path), "out": str(out_pdf)},
-        {"in": str(midi_path), "out": str(out_xml)}
-    ]
-    job_file.write_text(json.dumps(job_data))
+    cmd_pdf = [str(ms_path), "-o", str(out_pdf), str(midi_path)]
+    cmd_xml = [str(ms_path), "-o", str(out_xml), str(midi_path)]
     
-    cmd = [str(ms_path), "-j", str(job_file)]
     try:
-        subprocess.run(cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        subprocess.run(cmd_pdf, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        subprocess.run(cmd_xml, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except Exception as exc:
         raise TranscriptionError(f"MuseScore rendering failed: {exc}")
-    finally:
-        job_file.unlink(missing_ok=True)
 
-def run_full_pipeline(audio_path: str, work_dir: str, musescore_path: str, device: str, bpm: float, grid_division: int, split_pitch: int, progress_callback: ProgressCallback = None) -> dict:
+def run_full_pipeline(audio_path: str, work_dir: str, musescore_path: str, device: str, bpm: float, grid_division: int, gap_threshold_ms: float, progress_callback: ProgressCallback = None) -> dict:
     from piano_transcription_inference import PianoTranscription
     
     wd = Path(work_dir)
@@ -149,7 +145,6 @@ def run_full_pipeline(audio_path: str, work_dir: str, musescore_path: str, devic
     _log("Resampling audio and estimating BPM...", progress_callback)
     audio, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
     
-    # Auto-detect BPM if user left default
     estimated_tempo, _ = librosa.beat.beat_track(y=audio, sr=sr)
     actual_bpm = float(np.atleast_1d(estimated_tempo)[0]) if bpm == 120 else bpm
     _log(f"Using Tempo: {actual_bpm:.1f} BPM", progress_callback)
@@ -162,11 +157,9 @@ def run_full_pipeline(audio_path: str, work_dir: str, musescore_path: str, devic
     except Exception as exc:
         raise TranscriptionError(f"AI Model failed: {exc}")
 
-    _log("Cleaning sustain tails & quantizing to grid...", progress_callback)
-    clean_and_quantize_midi(str(raw_midi), str(clean_midi), actual_bpm, grid_division)
+    _log("Applying strict math quantization and gap cleanup...", progress_callback)
+    clean_and_quantize_midi(str(raw_midi), str(clean_midi), actual_bpm, grid_division, gap_threshold_ms)
     
-    engrave_batch_musescore(str(clean_midi), str(pdf_path), str(xml_path), musescore_path, progress_callback)
+    engrave_musescore(str(clean_midi), str(pdf_path), str(xml_path), musescore_path, progress_callback)
     
     return {"midi": str(clean_midi), "pdf": str(pdf_path), "musicxml": str(xml_path)}
-
-    
